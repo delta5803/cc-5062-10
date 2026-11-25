@@ -98,6 +98,65 @@ web/index.html     绘画窗口前端（零依赖原生 HTML/JS）
   使两种缓存边界在 `log` 中可核查（见 `test_shared_mask_rect_distinguishes_isolated_and_passthrough`
   与 `test_passthrough_mask.py`）。重算结果与全量求值逐字节一致由专门测试锁定。
 
+### 6.1 深层隔离组的复用与临时缓冲优化
+
+深嵌套组逐层展开时会重复合成、并为每个节点分配整幅背景快照。引擎在不改变任何像素
+（与完整参考逐层展开逐字节一致，见 `tests/test_optimization.py`、`tests/test_invalidation.py`）
+的前提下，按真实依赖复用中间结果：
+
+- **惰性背景快照（lazy backdrop snapshot）**：只有当节点本身是裁切基底、或它后面还有
+  裁切兄弟时，才需要放置前的背景克隆；普通节点跳过 `clone()`，记一次 `clone-skipped`。
+  深嵌套非裁切链因此每节点省掉一幅整画布缓冲。
+- **裁切基底 alpha 备忘（alpha memoization）**：节点“蒙版后的自身足迹”（裁切 alpha）
+  以 `(节点版本, 蒙版版本, rect)` 为键跨运行缓存；未变更的基底在后续求值里命中 `alpha-hit`，
+  不再重复渲染子树和应用蒙版。节点或蒙版一编辑，版本号变化即失效。
+- **冻结子树拼接（frozen-subtree splice）**：脏矩形重算时，满足全部下列依赖条件的隔离
+  边界直接从它**上一次自身的放置光栅**复制该矩形，记 `frozen-splice`，不重跑后代：
+  1. 存在上一次全量运行建立的放置光栅基线；2. 节点未裁切且为隔离边界（穿透组无自身边界、
+  裁切节点依赖基底与基底前背景）；3. 进入时该矩形背景为空（透明画布上放置=节点自身输出，
+  无需“反混合”；在已绘制背景上的旧混合值不可还原，必须重算）；4. 节点不在被编辑节点的
+  祖先链上（祖先携带脏矩形，软笔迹会在声明矩形外缘抗锯齿）；5. 子树内所有节点版本、以及
+  子树内任何蒙版版本均未变化。这是“按组保存的可复算合成边界”，不是盲目摊平。
+
+> 失效纪律：裁切链切换、裁切标志、图层/组不透明度、混合模式、蒙版编辑都会沿真实依赖
+> 正确失效；组不透明度始终作用于隔离后的组整体，绝不会摊到单层改变含义
+> （`test_group_opacity_not_flattened_to_single_layer`）。若某优化在“合成误差/缓冲峰值”
+> 之外造成任何行为退化，对应优化应撤回——基准以逐像素参考对照作为不可绕过的闸门。
+
+### 6.2 “为何重画”反查（图层检查器入口）
+
+`Evaluator.why_redraw(uid, rect)` 与 `mask_propagation(mask_id, rect)` 把缓存区反向追到
+传播到它的编辑：
+
+- 节点编辑区分 `direct-content-edit`（自身）与 `ancestor-content-edit`（祖先传播，带传播链）；
+- 蒙版编辑区分 `mask-placement-edit`（隔离读者：内容缓存复用，仅在脏矩形重应用蒙版）与
+  `mask-baked-into-isolated-ancestor`（穿透读者：蒙版烘焙进最近隔离祖先的局部渲染）。
+- 浏览器检查器的“为何重画”按钮调用 `GET /api/why`，点一个缓存区即可看到原因、缓存边界、
+  传播链与脏矩形；`GET /api/mask-propagation` 给出该蒙版每个读者的缓存边界处置。
+
+### 6.3 组求值成本分解与计算顺序
+
+`Evaluator.cost_breakdown()` 返回最近一次运行的成本分解，计算顺序即一次求值的真实推进顺序：
+
+1. `_begin_run` 清空事件计数并重置 `BufferTracker`（弱引用持有缓冲，不延长其生命周期）；
+2. 自底向上渲染：每个隔离节点先查内容缓存（`cache-hit` / `rebuild` / `recompute-rect`），
+   可冻结则 `frozen-splice`，否则放置（`place`，内含 `composite-calls` / `clip-calls` /
+   `mask-apply`）；穿透组记 `passthrough`；基底足迹命中记 `alpha-hit`，跳过的背景克隆记
+   `clone-skipped`；
+3. 后端三个光栅产出原语（`empty_raster` / `composite` / `apply_mask` / `clip_lerp`）被包装，
+   每个产出缓冲都计入分配次数、累计字节，并由弱引用集合算出**实时存活字节与峰值**；
+4. `_end_run` 快照缓冲峰值与累计分配，建立下一次冻结拼接所需的“各节点放置光栅”基线。
+
+成本分解同时通过 `POST /api/evaluate` 的 `cost` 字段返回，绘画窗口“图层合成运行状态”面板
+据此显示放置/命中/冻结/跳过克隆等事件与缓冲峰值，并对计量异常给出可见告警。
+
+### 6.4 图层执行基准（不允许伪报）
+
+`PYTHONPATH=src python3 -m layerpaint.benchmark`（模块 `layerpaint/benchmark.py`）以深嵌套隔离组和
+软边笔迹提升负载，对每个用例同时给出：成本分解、**合成误差**（优化脏矩形结果相对从零全量
+参考的最大逐通道字节差）、缓冲峰值与计时。参考后端必须 0 误差、加速后端容差 1 字节，否则
+进程以非零状态退出并判定基准无效——任何速度数字都建立在像素正确之上。
+
 ## 7. 两个后端如何互验
 
 - `ReferenceBackend`：逐像素浮点，W3C 定义公式，是“真值”。

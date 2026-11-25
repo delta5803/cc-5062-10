@@ -12,6 +12,8 @@ invents blend math in JavaScript.  Endpoints:
     POST /api/mask         paint into a shared mask
     POST /api/evaluate     run the evaluator, return composite PNG + trace
     GET  /api/pixel?x&y    per-stage RGBA evaluation for one pixel
+    GET  /api/why?uid&rect reverse lookup: which edits force a node to redraw
+    GET  /api/mask-propagation?mask_id&rect  per-reader mask dependency map
     POST /api/save         JSON project download
     POST /api/export       flattened PNG download
 
@@ -124,6 +126,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._get_state()
             if parsed.path == "/api/pixel":
                 return self._get_pixel(parse_qs(parsed.query))
+            if parsed.path == "/api/why":
+                return self._get_why(parse_qs(parsed.query))
+            if parsed.path == "/api/mask-propagation":
+                return self._get_mask_propagation(parse_qs(parsed.query))
             self._send_json({"error": "not found"}, 404)
         except Exception as exc:  # surfaced in the painting window
             self._error(exc, 500)
@@ -193,6 +199,24 @@ class Handler(BaseHTTPRequestHandler):
         with self.session.lock():
             stages = self.session.evaluator.pixel_trace(x, y)
         self._send_json({"x": x, "y": y, "stages": stages})
+
+    def _get_why(self, query):
+        uid = int(query["uid"][0])
+        rect = None
+        if "rect" in query and len(query["rect"][0].split()) == 4:
+            rect = tuple(int(v) for v in query["rect"][0].split())
+        with self.session.lock():
+            payload = self.session.evaluator.why_redraw(uid, rect=rect)
+        self._send_json(payload)
+
+    def _get_mask_propagation(self, query):
+        mask_id = query["mask_id"][0]
+        rect = None
+        if "rect" in query and len(query["rect"][0].split()) == 4:
+            rect = tuple(int(v) for v in query["rect"][0].split())
+        with self.session.lock():
+            payload = self.session.evaluator.mask_propagation(mask_id, rect=rect)
+        self._send_json(payload)
 
     # ------------------------------------------------------------ POST impl
 
@@ -303,6 +327,7 @@ class Handler(BaseHTTPRequestHandler):
             "png_base64": base64.b64encode(buf.getvalue()).decode("ascii"),
             "stages": stages,
             "log": self.session.evaluator.log,
+            "cost": self.session.evaluator.cost_breakdown(),
         })
 
     def _save(self):

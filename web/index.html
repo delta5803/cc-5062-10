@@ -76,6 +76,22 @@
   .seg { display: flex; gap: 4px; }
   .seg button { flex: 1; }
   .seg button.on { background: var(--accent); color: #0b1220; border-color: var(--accent); }
+  .why-box {
+    background: var(--panel2); border: 1px solid var(--line); border-radius: 6px;
+    padding: 7px 9px; font-size: 11px; margin-top: 4px; max-height: 220px; overflow: auto;
+  }
+  .why-box .reason { border-left: 2px solid var(--accent); padding: 4px 7px; margin: 4px 0; }
+  .why-box .cause { color: var(--accent); font-weight: 600; }
+  .why-box .path { color: var(--muted); font-family: ui-monospace, monospace; }
+  .why-box .none { color: var(--ok); }
+  .cost-box {
+    background: var(--panel2); border: 1px solid var(--line); border-radius: 6px;
+    padding: 7px 9px; font-size: 11px; font-variant-numeric: tabular-nums;
+  }
+  .cost-box .warn { color: var(--err); font-weight: 600; }
+  .cost-box .ok { color: var(--ok); }
+  .pill { display:inline-block; background:var(--panel); border:1px solid var(--line);
+    border-radius:10px; padding:1px 7px; margin:1px 3px 1px 0; color:var(--muted); }
 </style>
 </head>
 <body>
@@ -124,6 +140,10 @@
           <button id="f-clip-off">正常</button>
         </div>
       </div>
+      <div class="row">
+        <button id="btn-why" style="flex:1">为何重画（反查缓存依赖）</button>
+      </div>
+      <div id="why-box" class="why-box" style="display:none"></div>
     </div>
 
     <h2>画笔（真实软笔迹）</h2>
@@ -166,6 +186,8 @@
     <h2>颜色求值（实际运算）</h2>
     <div class="row"><span class="muted">像素：</span><span id="probe-pos">未选择</span></div>
     <div id="stages"></div>
+    <h2>图层合成运行状态</h2>
+    <div id="run-status" class="cost-box muted">尚未求值</div>
     <h2>重算日志（依赖驱动）</h2>
     <div class="log" id="log"></div>
   </section>
@@ -285,6 +307,7 @@ async function evaluate() {
   const data = await api("/api/evaluate", { backend });
   putPng(data.png_base64);
   $("log").textContent = data.log.map((r) => r.join(" ")).join("\n");
+  renderRunStatus(data);
   const box = $("stages"); box.innerHTML = "";
   data.stages.forEach((s) => {
     const div = document.createElement("div"); div.className = "stage";
@@ -295,6 +318,51 @@ async function evaluate() {
     box.appendChild(div);
   });
   return data;
+}
+
+function renderRunStatus(data) {
+  const el = $("run-status");
+  if (!data.cost) { el.textContent = "后端未返回成本分解"; return; }
+  const e = data.cost.events, b = data.cost.buffers;
+  const peakKb = (b.peak_live_bytes / 1024).toFixed(1);
+  const totalKb = (b.allocated_bytes / 1024).toFixed(1);
+  // Surface reuse events and flag anything abnormal for pixel/color eval.
+  const warnings = [];
+  if (b.peak_live_bytes <= 0) warnings.push("缓冲峰值为 0（计量异常）");
+  if (e.place + e.passthrough === 0) warnings.push("没有任何放置运算（结果可能为空）");
+  const pills = [
+    "放置 " + (e.place || 0), "穿透 " + (e.passthrough || 0),
+    "内容命中 " + (e["cache-hit"] || 0), "冻结复用 " + (e["frozen-splice"] || 0),
+    "矩形重算 " + (e["recompute-rect"] || 0), "蒙版 " + (e["mask-apply"] || 0),
+    "跳过克隆 " + (e["clone-skipped"] || 0), "alpha复用 " + (e["alpha-hit"] || 0),
+  ].map((t) => '<span class="pill">' + t + "</span>").join("");
+  el.innerHTML =
+    '<div>缓冲峰值 <b>' + peakKb + " KB</b> / 累计分配 " + totalKb +
+    " KB · 分配次数 " + b.allocations + "</div>" +
+    '<div style="margin-top:4px">' + pills + "</div>" +
+    (warnings.length
+      ? '<div class="warn" style="margin-top:5px">⚠ ' + warnings.join("；") + "</div>"
+      : '<div class="ok" style="margin-top:5px">合成像素与颜色求值运行正常，无异常</div>');
+}
+
+async function showWhyRedraw() {
+  const node = selectedNode();
+  const box = $("why-box");
+  box.style.display = "block";
+  if (!node) { box.innerHTML = '<span class="muted">请先选择一个节点</span>'; return; }
+  try {
+    const data = await api("/api/why?uid=" + node.uid);
+    if (!data.reasons.length) {
+      box.innerHTML = '<div class="none">该节点缓存可复用：没有传播到它的编辑。</div>';
+      return;
+    }
+    box.innerHTML = "<b>" + data.name + "</b> 为何重画：" +
+      data.reasons.map((r) =>
+        '<div class="reason"><div class="cause">' + r.cause + "</div>" +
+        (r.boundary ? '<div class="muted">缓存边界：' + r.boundary + "</div>" : "") +
+        '<div class="path">传播链：' + (r.path || []).join(" → ") + "</div>" +
+        '<div class="muted">脏矩形：' + JSON.stringify(r.rect) + "</div></div>").join("");
+  } catch (e) { box.innerHTML = '<span class="warn">反查失败：' + e.message + "</span>"; }
 }
 
 async function probePixel(x, y) {
@@ -414,6 +482,7 @@ $("brush-hardness").oninput = () => $("brush-hardness-val").textContent = $("bru
 $("zoom").oninput = () => { zoom = parseInt($("zoom").value); applyZoom(); };
 $("canvas").addEventListener("click", (ev) => { const p = eventPos(ev); probePixel(p.x, p.y); });
 $("btn-eval").onclick = evaluate;
+$("btn-why").onclick = showWhyRedraw;
 $("backend-seg").onclick = async (ev) => {
   if (ev.target.dataset.backend) {
     backend = ev.target.dataset.backend;

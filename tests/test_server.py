@@ -161,6 +161,38 @@ class TestServerAPI(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertIn("error", err)
 
+    def test_evaluate_reports_cost_breakdown(self):
+        _, data = self.h.post("/api/evaluate", {})
+        self.assertIn("cost", data)
+        self.assertIn("events", data["cost"])
+        self.assertIn("buffers", data["cost"])
+        self.assertGreater(data["cost"]["buffers"]["peak_live_bytes"], 0)
+
+    def test_why_endpoint_reports_redraw_reasons(self):
+        target = _find_layer(self.h.session.project, "speckle")
+        self.h.post("/api/stroke", {
+            "uid": target.uid,
+            "points": [{"x": 2, "y": 2}, {"x": 6, "y": 6}],
+            "color": [255, 0, 255, 255], "radius": 3, "hardness": 0.5,
+        })
+        status, data = self.h.get("/api/why?uid=%d" % target.uid)
+        self.assertEqual(status, 200)
+        self.assertEqual(data["name"], "speckle")
+        causes = {r["cause"] for r in data["reasons"]}
+        self.assertIn("direct-content-edit", causes)
+
+    def test_mask_propagation_endpoint_distinguishes_boundaries(self):
+        status, data = self.h.get(
+            "/api/mask-propagation?mask_id=vignette")
+        self.assertEqual(status, 200)
+        boundaries = {r["name"]: r["boundary"] for r in data["readers"]}
+        self.assertIn("isolated-painting", boundaries)
+        self.assertIn("pass-through-wash", boundaries)
+        self.assertEqual(
+            boundaries["isolated-painting"], "isolated-placement")
+        self.assertEqual(
+            boundaries["pass-through-wash"], "passthrough-baked")
+
 
 def _walk(node):
     yield node

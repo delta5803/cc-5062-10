@@ -9,7 +9,7 @@ backend is validated against this one.
 from ..blend import blend_pixel
 from ..colorspace import clamp01, premultiply, unpremultiply, unit_to_byte
 from ..raster import Raster
-from . import intersect_rect
+from . import intersect_rect, rect_fully_transparent as _rect_fully_transparent
 
 
 class ReferenceBackend:
@@ -25,6 +25,11 @@ class ReferenceBackend:
             return out
         x0, y0, x1, y1 = box
         bd, sd, od = backdrop.data, source.data, out.data
+        if _rect_fully_transparent(sd, backdrop.width, box):
+            # The source contributes nothing inside the box: the cloned
+            # backdrop already holds the correct answer, so no per-pixel
+            # blending work is required.
+            return out
         for y in range(y0, y1):
             for x in range(x0, x1):
                 i = (y * backdrop.width + x) * 4

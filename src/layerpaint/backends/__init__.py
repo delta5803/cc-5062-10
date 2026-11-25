@@ -26,3 +26,19 @@ def intersect_rect(rect, width, height):
     if x1 <= x0 or y1 <= y0:
         return None
     return (x0, y0, x1, y1)
+
+
+def rect_fully_transparent(data, width, box):
+    """True if every source alpha byte inside ``box`` is zero.
+
+    A transparent source cannot change a backdrop, so callers can skip the
+    per-pixel blend loop entirely.  The scan reads only the alpha channel of
+    the requested rectangle, not the whole raster.
+    """
+    x0, y0, x1, y1 = box
+    for y in range(y0, y1):
+        row = (y * width + x0) * 4 + 3
+        for i in range(row, row + (x1 - x0) * 4, 4):
+            if data[i] != 0:
+                return False
+    return True

@@ -13,7 +13,7 @@ divide.
 from ..blend import NON_SEPARABLE, SEPARABLE
 from ..colorspace import unit_to_byte
 from ..raster import Raster
-from . import intersect_rect
+from . import intersect_rect, rect_fully_transparent
 from .reference import ReferenceBackend
 
 
@@ -35,6 +35,8 @@ class AcceleratedBackend:
         fn = None if mode == "normal" else SEPARABLE[mode]
         x0, y0, x1, y1 = box
         bd, sd, od = backdrop.data, source.data, out.data
+        if rect_fully_transparent(sd, backdrop.width, box):
+            return out
         w = backdrop.width
         for y in range(y0, y1):
             row = y * w
