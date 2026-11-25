@@ -1,0 +1,54 @@
+# 数字绘画图层合成内核
+
+一个从零实现的数字绘画图层合成求值核心，带可实际绘画、调整图层并切换混合模式的图形窗口。
+不依赖任何第三方库，仅使用 Python 标准库（浏览器绘画窗口用原生 HTML/JS）。
+
+## 快速开始（图形入口）
+
+```bash
+./run_paint.sh                 # 然后打开 http://127.0.0.1:8765/
+```
+
+无 Tkinter 也不影响使用——浏览器窗口是默认图形入口，所有合成像素都由 Python 求值核心计算。
+详见 [`docs/USAGE.md`](docs/USAGE.md) 与 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+
+## 能力（按定义实现，非现成图层组件）
+
+- 完整有限的 **16 种 W3C 混合模式**：normal + 11 可分离 + 4 不可分离；
+- 图层/组不透明度，且**组不透明度与逐层不透明度不等价**（隔离后整体作用，不先摊平猜测）；
+- **隔离组与穿透组**：穿透组子图层读取外部实时背景，隔离组先在透明背景上自合成；
+- **裁切到下层**：基于基底自身 alpha 的预乘空间 lerp，含裁切链中断；
+- 共享蒙版，且隔离/穿透组的**缓存边界不同**，按读写依赖决定脏区重算范围；
+- 显式的颜色空间与预乘/非预乘转换；**透明像素隐藏颜色不污染软边**（零 alpha 存黑不变量）；
+- 真实软笔笔迹（可调半径/硬度/不透明度），在常见软边、低透明度下验证混合公式；
+- 两个独立后端互验：逐像素浮点 **CPU 参考** 与紧凑循环 **加速**，差异 ≤1 字节；
+- 逐层像素颜色求值、重算日志、自包含 JSON 工程、零依赖 PNG 导入导出。
+
+## 命令行（仅辅助）
+
+```bash
+export PYTHONPATH=src
+python3 -m layerpaint.cli demo out.png            # 渲染内置示例
+python3 -m layerpaint.cli render project.json out.png
+python3 -m layerpaint.cli pixel project.json 16 16   # 逐层像素求值
+python3 -m layerpaint.cli compare project.json       # 双后端一致性
+```
+
+## 测试
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+覆盖小尺寸可手算案例、半透明软笔迹、嵌套组、空组、裁切链中断、共享蒙版缓存边界、
+穿透蒙版依赖传播、脏矩形重算与全量一致、序列化/PNG 往返、双后端一致性、HTTP API 端到端。
+
+## 目录
+
+```
+src/layerpaint/   求值核心（颜色空间、混合、光栅、模型、引擎、后端、服务、CLI、序列化）
+web/              浏览器绘画窗口
+tests/            61 个单元/端到端测试
+examples/         真实绘画导出与示例工程
+docs/             架构约定与使用说明（图形入口清单）
+```
